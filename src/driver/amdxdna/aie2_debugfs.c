@@ -312,15 +312,35 @@ static ssize_t aie2_dram_logging_write(struct file *file, const char __user *ptr
 
 static int aie2_dram_logging_show(struct seq_file *m, void *unused)
 {
-	struct amdxdna_dev_hdl *ndev = m->private;
+  struct amdxdna_dev_hdl *ndev = m->private;
 
-	if (aie2_is_dram_logging_enable(ndev))
-		seq_puts(m, "Dram logging is enabled\n");
-	else
-		seq_puts(m, "Dram logging is disabled\n"
-						"echo 1 > To enable logging\n");
+  if (aie2_is_dram_logging_enable(ndev)) {
+    seq_puts(m, "Dram logging is enabled\n");
 
-	return 0;
+		u64 logging_level = -1;
+		mutex_lock(&ndev->aie2_lock);
+    aie2_get_runtime_cfg(ndev, RUNTIME_CONFIGURATION_LOGGING_LEVEL, &logging_level);
+		mutex_unlock(&ndev->aie2_lock);
+		seq_printf(m, "logging level: %u\n", (u32)logging_level);
+
+		u64 logging_format = -1;
+		mutex_lock(&ndev->aie2_lock);
+		aie2_get_runtime_cfg(ndev, RUNTIME_CONFIGURATION_LOGGING_FORMAT, &logging_format);
+		mutex_unlock(&ndev->aie2_lock);
+		seq_printf(m, "logging format: %u\n", (u32)logging_format);
+
+		u64 logging_destination = -1;
+		mutex_lock(&ndev->aie2_lock);
+		aie2_get_runtime_cfg(ndev, RUNTIME_CONFIGURATION_LOGGING_DESTINATION, &logging_destination);
+		mutex_unlock(&ndev->aie2_lock);
+		seq_printf(m, "logging destination: %u\n", (u32)logging_destination);
+
+  } else {
+    seq_puts(m, "Dram logging is disabled\n"
+                "echo 1 > To enable logging\n");
+  }
+
+  return 0;
 }
 
 AIE2_DBGFS_FOPS(dram_logging, aie2_dram_logging_show, aie2_dram_logging_write);

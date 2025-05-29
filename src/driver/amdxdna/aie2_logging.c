@@ -17,8 +17,8 @@ struct logging_req_buf {
 	struct workqueue_struct  *wq;
 	struct work_struct       work;
 	u8                       *kern_log_buf;
-	u8                       *buf;
-	u64                      dram_buffer_address;
+	u8                       *buf;                // virtual address of the dma buffer
+	dma_addr_t               dram_buffer_address; // dma-handle to the buffer
 	u32                      dram_buffer_size;
 	u32                      msi_address;
 	int                      log_ch_irq;
@@ -47,6 +47,16 @@ struct log_msg_header {
 	u8 *msg;
 };*/
 
+static u64 head_ptr = 0;
+
+static const char *s_log_level_str[] = {
+    "NONE",
+    "ERROR",
+    "WARN",
+    "INFO",
+    "DEBUG",
+};
+
 static void clear_logging_msix(struct amdxdna_dev_hdl *ndev)
 {
 	u64 iohub_ptr = ndev->logging_req->msi_address;
@@ -65,23 +75,28 @@ static int aie2_is_logging_supported_on_dev(struct amdxdna_dev_hdl *ndev)
 
 static u32 aie2_get_log_content(struct logging_req_buf *req_buf)
 {
-	u32 head_ptr, tail_ptr, head_ptr_wrap, tail_ptr_wrap;
+	u64 tail_ptr;
+	u32 head_ptr_wrap, tail_ptr_wrap;
 	struct amdxdna_dev_hdl *ndev = req_buf->ndev;
-	struct log_buffer_metadata *log_metadata;
+	struct log_buffer_metadata log_metadata;
 	u8 *kern_buf = req_buf->kern_log_buf;
 	u8 *sys_buf = req_buf->buf;
-        u32 log_size = 0;
+	u32 log_size = 0;
+	const u64 footer_start_offset = DRAM_LOG_BUF_SIZE - sizeof(struct log_buffer_metadata);
 
 	WARN_ON(LOG_RB_SIZE <= 0);
-	log_metadata = (struct log_buffer_metadata *)(sys_buf + LOG_RB_SIZE);
-	head_ptr = (u32)(log_metadata->head_offset);
-	tail_ptr = (u32)(log_metadata->tail_offset);
+	// read log_metadata from the end of the buffer using memcpy
+	drm_clflush_virt_range(req_buf->buf + footer_start_offset, sizeof(struct log_buffer_metadata)); // device can update footer
+	memcpy(&log_metadata, sys_buf + DRAM_LOG_BUF_SIZE - sizeof(struct log_buffer_metadata),
+	       sizeof(struct log_buffer_metadata));
+	tail_ptr = log_metadata.tail_offset;
+	// TODO: watchout for missing carry because the firmware writes low and high words of the offset separately
 	head_ptr_wrap = head_ptr % LOG_RB_SIZE;
 	tail_ptr_wrap = tail_ptr % LOG_RB_SIZE;
 	log_size = tail_ptr - head_ptr;
 
-	XDNA_INFO(ndev->xdna, "log_size %u head_ptr 0x%u tail_ptr 0x%u head_wp 0x%u tail_wp 0x%u",
-		  log_size, head_ptr, tail_ptr, head_ptr_wrap, tail_ptr_wrap);
+	XDNA_DBG(ndev->xdna, "log_size %u head_ptr 0x%llx tail_ptr 0x%llx head_wp 0x%x tail_wp 0x%x",
+			log_size, head_ptr, tail_ptr, head_ptr_wrap, tail_ptr_wrap);
 
 	if (!log_size)
 		return log_size;
@@ -89,32 +104,34 @@ static u32 aie2_get_log_content(struct logging_req_buf *req_buf)
 	/*print_hex_dump_debug("Log data: ", DUMP_PREFIX_ADDRESS, 8, 1, sys_buf,
 			     log_size, true);*/
 
-	log_metadata->head_offset = tail_ptr;
-        dma_sync_single_range_for_cpu(ndev->xdna->ddev.dev, req_buf->dram_buffer_address,
-                                      (unsigned long)(sys_buf + LOG_RB_SIZE), 16, DMA_TO_DEVICE);
+	head_ptr = tail_ptr;
 
 	/* Handle buffer overflow case, dump all log w.r.t timestamp */
-        if (log_size > LOG_RB_SIZE) {
-                XDNA_ERR(ndev->xdna, "log_size is %u, buffer overflow!", log_size);
-                u32 part_log = LOG_RB_SIZE - tail_ptr_wrap;
+	if (log_size > LOG_RB_SIZE) {
+		XDNA_ERR(ndev->xdna, "log_size is %u, buffer overflow!", log_size);
+		u32 part_log = LOG_RB_SIZE - tail_ptr_wrap;
+		drm_clflush_virt_range(req_buf->buf, DRAM_LOG_BUF_SIZE);
+		memcpy((u8 *)kern_buf, (u8 *)(sys_buf + tail_ptr_wrap), part_log);
+		memcpy((u8 *)(kern_buf + part_log), (u8 *)sys_buf, tail_ptr_wrap);
+		return LOG_RB_SIZE;
+	}
 
-                memcpy((u8 *)kern_buf, (u8 *)(sys_buf + tail_ptr_wrap), part_log);
-                memcpy((u8 *)(kern_buf + part_log), (u8 *)sys_buf, tail_ptr_wrap);
-                return LOG_RB_SIZE;
-        }
+	/*Buffer split into two section when tail is wrapped and copy both */
+	if (tail_ptr_wrap < head_ptr_wrap) {
+		XDNA_DBG(ndev->xdna, "Under buffer split");
+		u32 part_log = LOG_RB_SIZE - head_ptr_wrap;
 
-        /*Buffer split into two section when tail is wrapped and copy both */
-        if (tail_ptr_wrap < head_ptr_wrap) {
-		XDNA_ERR(ndev->xdna, "Under buffer split");
-                u32 part_log = LOG_RB_SIZE - head_ptr_wrap;
-
-                memcpy((u8 *)kern_buf, (u8 *)(sys_buf + head_ptr_wrap), part_log);
-                memcpy((u8 *)(kern_buf + part_log), (u8 *)sys_buf, tail_ptr_wrap);
-                return log_size;
-        }
-        /* General case when tail > head and with in log buff size */
-        memcpy((u8 *)kern_buf, (u8 *)(sys_buf + head_ptr_wrap), log_size);
-        return log_size;
+		drm_clflush_virt_range(req_buf->buf + head_ptr_wrap, part_log);
+		memcpy((u8 *)kern_buf, (u8 *)(sys_buf + head_ptr_wrap), part_log);
+		drm_clflush_virt_range(req_buf->buf, tail_ptr_wrap);
+		memcpy((u8 *)(kern_buf + part_log), (u8 *)sys_buf, tail_ptr_wrap);
+		return log_size;
+	}
+	/* General case when tail > head and with in log buff size */
+	drm_clflush_virt_range(req_buf->buf + head_ptr_wrap, log_size);
+	memcpy(kern_buf, (u8 *)(sys_buf + head_ptr_wrap), log_size);
+	
+	return log_size;
 }
 
 static void aie2_print_log_buffer_data(struct amdxdna_dev_hdl *ndev)
@@ -122,53 +139,50 @@ static void aie2_print_log_buffer_data(struct amdxdna_dev_hdl *ndev)
 	u32 header_size = sizeof(struct log_msg_header);
 	struct logging_req_buf *req_buf;
 	u32 log_size;
-	u8 *sys_buf;
 
 	req_buf = ndev->logging_req;
-	sys_buf = req_buf->buf;
-	dma_sync_single_range_for_cpu(ndev->xdna->ddev.dev, req_buf->dram_buffer_address,
-				     (unsigned long)(sys_buf + LOG_RB_SIZE), 16, DMA_FROM_DEVICE);
 
 	log_size = aie2_get_log_content(req_buf);
 	//XDNA_INFO(ndev->xdna, "FW log size in bytes %u", log_size);
 
 	if (!log_size) {
-		XDNA_ERR(ndev->xdna, "No log data available");
 		return;
 	}
 
 	char *str = (char *)req_buf->kern_log_buf;
 	char *end = (char *)str + log_size;
 
-	/*print_hex_dump_debug("kern_buff: ", DUMP_PREFIX_ADDRESS, 8, 1, (u8 *)str,
-                              log_size+8, true);*/
+	// TODO: add support for concise logging format
+	if (*str != 0xc0) {
+		print_hex_dump_debug("kern_buff: ", DUMP_PREFIX_ADDRESS, 8, 1, (u8 *)str, log_size+8, true);
+	}
 
-	while (str && *str != 0xc0 && str < end)
+	// For robustness - incase there's an overflow that we haven't detected yet, we
+	// try to synchronize to the beginning of the message
+	while (str && str < end && *str != 0xc0) {
 		str += sizeof(char)*8;
+	}
 
 	while (str && str < end) {
-		struct log_msg_header *header = (struct log_msg_header *)str;
+		const struct log_msg_header *header = (const struct log_msg_header *)str;
 		char *msg = (char *)(str+header_size);
-		u32 msg_size;
+		const char *log_level_str = s_log_level_str[header->level];
 
-		if (!header) {
-			XDNA_ERR(ndev->xdna, "vs- header is null !");
-			return;
-		}
-
-		if (!msg) {
-			XDNA_ERR(ndev->xdna, "vs- msg is null, not aligned to 8 bit? ");
-			return;
-		}
-
-		msg_size = (header->argc)*4;
-		msg_size = ((msg_size/ 8) + (msg_size % 8 ? 1 : 0)) * 8 + header_size;
+		u32 msg_size = (header->argc)*4;
+		// TODO: verify null termination before printing. Last uint32_t of the msg should have atleast 1 0x0 in one of the  byte positions
+		// TODO: manually add null termination to the msg (even though the firmware guarantees this, we should be robust against future changes)
+		msg_size = ((msg_size/ 8) + (msg_size % 8 ? 1 : 0)) * 8 + header_size; // (msg_size + (8 - 1)) / 8 * 8
 		str += msg_size;
-		XDNA_INFO(ndev->xdna, "[NPU FW]:%s", msg);
+		if (str > end) {
+			XDNA_ERR(ndev->xdna, "Inconsistent message length in log buffer (str %p end %p)", str, end);
+			break;
+		}
+		// TODO check if XDNA_INFO can handle %*s (i.e. print with size). If so, then we don't have to check null termination
+		XDNA_INFO(ndev->xdna, "[NPU FW %s] [APP: %u]: %s", log_level_str, header->appn, msg);
 
-	        while (str && *str != 0xc0 && str < end) {
+		while (str && str < end && *str != 0xc0) {
 			str += sizeof(char)*8;
-			XDNA_ERR(ndev->xdna, "vs- str is null after msg!");
+			XDNA_ERR(ndev->xdna, "invalid message header!");
 		}
 	}
 }
@@ -222,7 +236,7 @@ int aie2_configure_log_buf_irq(struct amdxdna_dev_hdl *ndev,
 		goto destroy_wq;
 	}
 
-	req_buf->kern_log_buf = kcalloc(DRAM_LOG_BUF_SIZE, sizeof(u8), GFP_KERNEL);
+	req_buf->kern_log_buf = kzalloc(DRAM_LOG_BUF_SIZE, GFP_NOWAIT);
 	if (!req_buf->kern_log_buf) {
 		ret = -ENOMEM;
 		goto free_irq;
@@ -236,7 +250,7 @@ destroy_wq:
 	destroy_workqueue(req_buf->wq);
 free_dma_log_buf:
 	dma_free_noncoherent(xdna->ddev.dev, req_buf->dram_buffer_size, req_buf->buf,
-			     (dma_addr_t)req_buf->dram_buffer_address, DMA_BIDIRECTIONAL);
+			     req_buf->dram_buffer_address, DMA_FROM_DEVICE);
 	req_buf->buf = NULL;
 	req_buf->dram_buffer_address = 0;
 	req_buf->dram_buffer_size = 0;
@@ -246,7 +260,6 @@ free_dma_log_buf:
 void aie2_remove_log_buf_irq(struct amdxdna_dev_hdl *ndev)
 {
 	struct logging_req_buf *req_buf = ndev->logging_req;
-
 	cancel_work_sync(&req_buf->work);
 	/* print already accumulated FW logs */
 	aie2_print_log_buffer_data(ndev);
@@ -262,11 +275,13 @@ static int aie2_alloc_log_buf(struct amdxdna_dev_hdl *ndev)
 	struct amdxdna_dev *xdna = ndev->xdna;
 
 	req_buf->buf = dma_alloc_noncoherent(xdna->ddev.dev, DRAM_LOG_BUF_SIZE,
-					     (dma_addr_t *)&req_buf->dram_buffer_address,
-					     DMA_BIDIRECTIONAL, GFP_KERNEL);
+                                       &req_buf->dram_buffer_address,
+                                       DMA_FROM_DEVICE, GFP_KERNEL);
 
 	if (!req_buf->buf)
 		return -ENOMEM;
+
+	drm_clflush_virt_range(req_buf->buf, DRAM_LOG_BUF_SIZE); /* device can use this now */
 
 	req_buf->dram_buffer_size = DRAM_LOG_BUF_SIZE;
 	XDNA_INFO(ndev->xdna, "Dram log buf addr: 0x%llx size 0x%x",
@@ -281,11 +296,12 @@ static void aie2_free_log_buf(struct amdxdna_dev_hdl *ndev)
 	struct amdxdna_dev *xdna = ndev->xdna;
 
 	dma_free_noncoherent(xdna->ddev.dev, req_buf->dram_buffer_size, req_buf->buf,
-			     (dma_addr_t)req_buf->dram_buffer_address, DMA_BIDIRECTIONAL);
+                       req_buf->dram_buffer_address, DMA_FROM_DEVICE);
 
 	req_buf->buf = NULL;
 	req_buf->dram_buffer_address = 0;
 	req_buf->dram_buffer_size = 0;
+	head_ptr = 0;
 }
 
 static int aie2_configure_and_start_logging(struct amdxdna_dev_hdl *ndev)
@@ -360,6 +376,13 @@ static int aie2_stop_and_remove_logging_config(struct amdxdna_dev_hdl *ndev)
 	XDNA_INFO(xdna, "Set runtime cfg logging dest fixed success!");
 
 	aie2_remove_log_buf_irq(ndev);
+
+	// detach logger by setting buffer size to 0
+  ret = aie2_configure_dram_logging(ndev, ndev->logging_req->dram_buffer_address, 0);
+  if (ret) {
+    XDNA_ERR(xdna, "Failed to detach logger, ret %d", ret);
+  }
+
 	aie2_free_log_buf(ndev);
 
 	return 0;
@@ -435,8 +458,9 @@ void aie2_dram_logging_fini(struct amdxdna_dev_hdl *ndev)
 	if (!ndev->logging_req)
 		return;
 
-	if (aie2_is_dram_logging_enable(ndev))
+	if (aie2_is_dram_logging_enable(ndev)) {
 		aie2_assign_dram_logging_state(ndev, false);
+  }
 
 	kfree(ndev->logging_req);
 	ndev->logging_req = NULL;

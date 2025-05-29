@@ -433,6 +433,11 @@ int aie2_configure_dram_logging(struct amdxdna_dev_hdl *ndev, dma_addr_t addr, u
 	if (ret)
 		return ret;
 
+	// message with size 0 is used to detach the logging buffer
+	if (size == 0) {
+		return 0;
+	}
+
 	aie2_configure_log_buf_irq(ndev, &resp);
 	return 0;
 }

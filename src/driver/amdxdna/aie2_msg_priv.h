@@ -43,10 +43,9 @@ enum aie2_msg_opcode {
 	MSG_OP_START_EVENT_TRACE           = 0x10F,
 	MSG_OP_STOP_EVENT_TRACE            = 0x110,
 	MSG_OP_UPDATE_PROPERTY             = 0x113,
-	//MSG_OP_GET_APP_HEALTH              = 0x114,
-	//MSG_OP_ADD_HOST_BUFFER             = 0x115,
-	MSG_OP_ADD_HOST_BUFFER             = 0x114,
-	MSG_OP_CONFIG_LOGGING_DRAM_BUF	   = 0x115,
+	MSG_OP_GET_APP_HEALTH              = 0x114,
+	MSG_OP_CONFIG_LOGGING_DRAM_BUF     = 0x115,
+	MSG_OP_ADD_HOST_BUFFER             = 0x116,
 	MSG_OP_MAX_DRV_OPCODE,
 	MSG_OP_GET_PROTOCOL_VERSION        = 0x301,
 	MSG_OP_MAX_OPCODE
@@ -408,11 +407,11 @@ struct async_event_msg_resp {
 /* Start of event tracing data struct */
 #define EVENT_TRACE_BUF_METADATA_SIZE			0x40
 #define TRACE_EVENT_BUF_SIZE				0x2000
-#define DRAM_LOG_BUF_SIZE				0x2000
-#define TRACE_EVENT_BUF_METADATA_SIZE			0x40
 #define MAX_ONE_TIME_LOG_INFO_LEN			16
 #define MSI_ADDR_MASK					0x00FFFFFF
-#define LOG_RB_SIZE	(TRACE_EVENT_BUF_SIZE - TRACE_EVENT_BUF_METADATA_SIZE)
+#define DRAM_LOG_BUF_SIZE           0x10000
+#define DRAM_LOG_BUF_METADATA_SIZE  0x40
+#define LOG_RB_SIZE	(DRAM_LOG_BUF_SIZE - DRAM_LOG_BUF_METADATA_SIZE)
 
 enum event_trace_destination {
 	EVENT_TRACE_DEST_DEBUG_BUS,
