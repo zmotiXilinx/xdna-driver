@@ -53,10 +53,10 @@ void aie2_dump_ctx(struct amdxdna_ctx *ctx)
 	struct amdxdna_dev *xdna = ctx->client->xdna;
 	struct aie2_mgmt_dma_hdl mgmt_hdl;
 	struct amdxdna_dev_hdl *ndev;
-	struct app_health_report *r;
+	struct app_health_report *report;
 	u64 comp = ctx->completed;
 	u64 sub = ctx->submitted;
-	size_t size = sizeof(*r);
+	size_t size = sizeof(*report);
 	void *buff;
 	int ret;
 
@@ -68,38 +68,77 @@ void aie2_dump_ctx(struct amdxdna_ctx *ctx)
 		XDNA_WARN(xdna, "Allocate memory failed, skip get app health");
 		return;
 	}
+	// --------------------------------------------------------------------------
+	// Full Core dump
+	// --------------------------------------------------------------------------
+
+	struct aie2_mgmt_dma_hdl *tile_mgmt_hdl;
+	void **tile_buff;
+
+	tile_mgmt_hdl = kcalloc(AIE2_NUM_TILES, sizeof(*tile_mgmt_hdl), GFP_KERNEL);
+	if (!tile_mgmt_hdl) {
+		printk(KERN_ERR "Failed to allocate tile management handle array\n");
+		return;
+	}
+
+	tile_buff = kcalloc(AIE2_NUM_TILES, sizeof(*tile_buff), GFP_KERNEL);
+	if (!tile_buff) {
+		printk(KERN_ERR "Failed to allocate tile buffer array\n");
+		goto free_mem;
+	}
+
+	buff = aie2_mgmt_buff_alloc(ndev, &mgmt_hdl, size, DMA_FROM_DEVICE);
+	if (!buff) {
+		printk(KERN_ERR "Failed to allocate management buffer\n");
+		goto free_mem;
+	}
+
+	for (int i = 0; i < AIE2_NUM_TILES; i++) {
+		tile_buff[i] = aie2_mgmt_buff_alloc(ndev, &tile_mgmt_hdl[i], AIE2_TILE_CORE_DUMP_SIZE, DMA_FROM_DEVICE);
+		if (!tile_buff[i]) {
+			XDNA_ERR(xdna, "Failed to allocate buffer for tile %d - what about tile mgmt buffer?!", i);
+			goto free_mem;
+		}
+		aie2_mgmt_buff_clflush(&tile_mgmt_hdl[i]);
+	}
+
+	// --------------------------------------------------------------------------
 
 	aie2_mgmt_buff_clflush(&mgmt_hdl);
 	mutex_lock(&ndev->aie2_lock);
-	ret = aie2_get_app_health(ndev, &mgmt_hdl, ctx->priv->id, size);
+	ret = aie2_get_app_health(ndev, &mgmt_hdl, ctx->priv->id, size, tile_mgmt_hdl);
 	mutex_unlock(&ndev->aie2_lock);
 	if (!ret) {
-		r = buff;
+		report = buff;
 
 		print_hex_dump_debug("raw_report: ", DUMP_PREFIX_OFFSET, 16, 4, buff, size, false);
 
 		XDNA_ERR(xdna, "Firmware timeout state capture:");
-		XDNA_ERR(xdna, "\tVersion: %d.%d", r->major, r->minor);
-		XDNA_ERR(xdna, "\tReport size: 0x%x", r->size);
-		XDNA_ERR(xdna, "\tContext ID: %d", r->context_id);
-		XDNA_ERR(xdna, "\tDPU PC: 0x%x", r->dpu_pc);
-		XDNA_ERR(xdna, "\tTXN OP ID: 0x%x", r->txn_op_id);
-		XDNA_ERR(xdna, "\tContext PC: 0x%x", r->ctx_pc);
-		XDNA_ERR(xdna, "\tFatal error type: 0x%x", r->fatal_info.fatal_type);
-		XDNA_ERR(xdna, "\tFatal error exception type: 0x%x", r->fatal_info.exception_type);
-		XDNA_ERR(xdna, "\tFatal error exception PC: 0x%x", r->fatal_info.exception_pc);
-		XDNA_ERR(xdna, "\tFatal error app module: 0x%x", r->fatal_info.app_module);
-		XDNA_ERR(xdna, "\tFatal error task ID: %d", r->fatal_info.task_index);
+		XDNA_ERR(xdna, "\tVersion: %d.%d", report->major, report->minor);
+		XDNA_ERR(xdna, "\tReport size: 0x%x", report->size);
+		XDNA_ERR(xdna, "\tContext ID: %d", report->context_id);
+		XDNA_ERR(xdna, "\tDPU PC: 0x%x", report->dpu_pc);
+		XDNA_ERR(xdna, "\tTXN OP ID: 0x%x", report->txn_op_id);
+		XDNA_ERR(xdna, "\tContext PC: 0x%x", report->ctx_pc);
+		XDNA_ERR(xdna, "\tFatal error type: 0x%x", report->fatal_info.fatal_type);
+		XDNA_ERR(xdna, "\tFatal error exception type: 0x%x", report->fatal_info.exception_type);
+		XDNA_ERR(xdna, "\tFatal error exception PC: 0x%x", report->fatal_info.exception_pc);
+		XDNA_ERR(xdna, "\tFatal error app module: 0x%x", report->fatal_info.app_module);
+		XDNA_ERR(xdna, "\tFatal error task ID: %d", report->fatal_info.task_index);
 
-		ctx->health_data.fatal_error_exception_type = r->fatal_info.exception_type;
-		ctx->health_data.fatal_error_exception_pc = r->fatal_info.exception_pc;
-		ctx->health_data.fatal_error_app_module = r->fatal_info.app_module;
-		ctx->health_data.fatal_error_type = r->fatal_info.fatal_type;
-		ctx->health_data.app_health_report_size = r->size;
-		ctx->health_data.txn_op_idx = r->txn_op_id;
-		ctx->health_data.ctx_pc = r->ctx_pc;
+		ctx->health_data.fatal_error_exception_type = report->fatal_info.exception_type;
+		ctx->health_data.fatal_error_exception_pc = report->fatal_info.exception_pc;
+		ctx->health_data.fatal_error_app_module = report->fatal_info.app_module;
+		ctx->health_data.fatal_error_type = report->fatal_info.fatal_type;
+		ctx->health_data.app_health_report_size = report->size;
+		ctx->health_data.txn_op_idx = report->txn_op_id;
+		ctx->health_data.ctx_pc = report->ctx_pc;
 		ctx->health_data.version = 0;
 		ctx->health_reported = false;
+
+		// Print tile core dumps
+		print_hex_dump(KERN_INFO, "tile_core_dump: ", DUMP_PREFIX_OFFSET, 16, 2,
+					tile_buff[0], AIE2_TILE_CORE_DUMP_SIZE, false);
 	}
 	aie2_mgmt_buff_free(&mgmt_hdl);
 
@@ -118,6 +157,18 @@ void aie2_dump_ctx(struct amdxdna_ctx *ctx)
 		XDNA_ERR(xdna, "\tout_fence: %s", aie2_fence_state2str(j->out_fence));
 	}
 	mutex_unlock(&ctx->priv->io_lock);
+
+free_mem:
+	if (tile_buff) {
+		kfree(tile_buff);
+	}
+	if (tile_mgmt_hdl) {
+		kfree(tile_mgmt_hdl);
+	}
+	for (int i = 0; i < AIE2_NUM_TILES; i++) {
+		if (tile_buff[i])
+			aie2_mgmt_buff_free(&tile_mgmt_hdl[i]);
+	}
 }
 
 static void aie2_ctx_wait_for_idle(struct amdxdna_ctx *ctx)

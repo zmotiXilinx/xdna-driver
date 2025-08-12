@@ -681,7 +681,7 @@ int aie2_register_asyn_event_msg(struct amdxdna_dev_hdl *ndev, struct aie2_mgmt_
 }
 
 int aie2_get_app_health(struct amdxdna_dev_hdl *ndev, struct aie2_mgmt_dma_hdl *mgmt_hdl,
-			u32 context_id, u32 size)
+			u32 context_id, u32 size, struct aie2_mgmt_dma_hdl *core_dump_hdl)
 {
 	DECLARE_AIE2_MSG(get_app_health, MSG_OP_GET_APP_HEALTH);
 	struct amdxdna_dev *xdna = ndev->xdna;
@@ -689,6 +689,7 @@ int aie2_get_app_health(struct amdxdna_dev_hdl *ndev, struct aie2_mgmt_dma_hdl *
 	int ret;
 
 	addr = aie2_mgmt_buff_get_dma_addr(mgmt_hdl);
+	XDNA_DBG(xdna, "Get app health addr 0x%llx size 0x%x", addr, size);
 	if (!addr) {
 		XDNA_ERR(xdna, "Invalid DMA address: %lld", addr);
 		return -EINVAL;
@@ -697,6 +698,17 @@ int aie2_get_app_health(struct amdxdna_dev_hdl *ndev, struct aie2_mgmt_dma_hdl *
 	req.buf_addr = addr;
 	req.context_id = context_id;
 	req.buf_size = size;
+
+	if (core_dump_hdl) {
+		for (int i = 0; i < AIE2_NUM_TILES; i++) {
+			req.core_dump_addr[i] = aie2_mgmt_buff_get_dma_addr(&core_dump_hdl[i]);
+			XDNA_DBG(xdna, "Core dump addr[%d] 0x%llx", i, req.core_dump_addr[i]);
+			if (!req.core_dump_addr[i]) {
+				XDNA_ERR(xdna, "Invalid DMA address: %lld", req.core_dump_addr[i]);
+				return -EINVAL;
+			}
+		}
+	}
 
 	ret = aie2_send_mgmt_msg_wait_silent(ndev, &msg);
 	if (ret) {

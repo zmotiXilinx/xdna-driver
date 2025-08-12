@@ -739,10 +739,14 @@ struct app_health_report {
 	u32				resv[1528];
 };
 
+#define AIE2_TILE_CORE_DUMP_SIZE 1*1024*1024 /* 1 MB */
+#define AIE2_NUM_TILES 48 /* 6 rows * 8 columns */
+
 struct get_app_health_req {
 	u32 context_id;
 	u32 buf_size;
 	u64 buf_addr;
+	u64 core_dump_addr[AIE2_NUM_TILES];
 } __packed;
 
 struct get_app_health_resp {

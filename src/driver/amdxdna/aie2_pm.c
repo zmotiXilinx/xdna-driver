@@ -149,11 +149,11 @@ int aie2_pm_init(struct amdxdna_dev_hdl *ndev)
 	if (ret)
 		return ret;
 
-	ret = pm_set_clk_gating(ndev, AIE2_CLK_GATING_ENABLE);
+	ret = pm_set_clk_gating(ndev, AIE2_CLK_GATING_DISABLE);
 	if (ret)
 		return ret;
 
-	ndev->pw_mode = POWER_MODE_DEFAULT;
+	ndev->pw_mode = POWER_MODE_TURBO;
 	ndev->dft_dpm_level = 0; // Start with lowest DPM level
 	ndev->sys_eff_factor = sys_eff_factor;
 	if (!ndev->sys_eff_factor)

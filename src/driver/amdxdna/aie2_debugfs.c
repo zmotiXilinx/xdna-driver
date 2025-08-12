@@ -894,13 +894,37 @@ static int aie2_get_app_health_show(struct seq_file *m, void *unused)
 	int ret;
 	u32 context_id = ndev->debug_context_id ?: 1; /* default context id */
 
-	buff = aie2_mgmt_buff_alloc(ndev, &mgmt_hdl, size, DMA_FROM_DEVICE);
-	if (!buff)
+	struct aie2_mgmt_dma_hdl *tile_mgmt_hdl;
+	void **tile_buff;
+
+	tile_mgmt_hdl = kcalloc(AIE2_NUM_TILES, sizeof(*tile_mgmt_hdl), GFP_KERNEL);
+	if (!tile_mgmt_hdl)
 		return -ENOMEM;
+
+	tile_buff = kcalloc(AIE2_NUM_TILES, sizeof(*tile_buff), GFP_KERNEL);
+	if (!tile_buff) {
+		kfree(tile_mgmt_hdl);
+		return -ENOMEM;
+	}
+
+	buff = aie2_mgmt_buff_alloc(ndev, &mgmt_hdl, size, DMA_FROM_DEVICE);
+	if (!buff) {
+		ret = -ENOMEM;
+		goto free_arrays;
+	}
+
+	for (int i = 0; i < AIE2_NUM_TILES; i++) {
+		tile_buff[i] = aie2_mgmt_buff_alloc(ndev, &tile_mgmt_hdl[i], AIE2_TILE_CORE_DUMP_SIZE, DMA_FROM_DEVICE);
+		if (!tile_buff[i]) {
+			XDNA_ERR(xdna, "Failed to allocate buffer for tile %d", i);
+			goto free_buf;
+		}
+		aie2_mgmt_buff_clflush(&tile_mgmt_hdl[i]);
+	}
 
 	aie2_mgmt_buff_clflush(&mgmt_hdl);
 	mutex_lock(&ndev->aie2_lock);
-	ret = aie2_get_app_health(ndev, &mgmt_hdl, context_id, size);
+	ret = aie2_get_app_health(ndev, &mgmt_hdl, context_id, size, tile_mgmt_hdl);
 	mutex_unlock(&ndev->aie2_lock);
 	if (ret) {
 		XDNA_ERR(xdna, "Get app health failed ret %d", ret);
@@ -918,6 +942,9 @@ static int aie2_get_app_health_show(struct seq_file *m, void *unused)
 
 free_buf:
 	aie2_mgmt_buff_free(&mgmt_hdl);
+free_arrays:
+	kfree(tile_buff);
+	kfree(tile_mgmt_hdl);
 	return ret;
 }
 
