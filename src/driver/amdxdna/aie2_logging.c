@@ -14,6 +14,9 @@
 #include "amdxdna_trace.h"
 #include "amdxdna_mailbox.h"
 
+#define LOG_FORMAT_FULL		0x0
+#define LOG_MSG_ALIGN			8
+
 struct logging_req_buf {
 	struct amdxdna_dev_hdl   *ndev;
 	struct workqueue_struct  *wq;
@@ -28,18 +31,27 @@ struct logging_req_buf {
 	u32			 log_format;
 	u32			 log_dest;
 	int                      log_ch_irq;
-	u64			 rb_head;
+	u32			 read_count;
 	bool                     enabled;
 };
 
+// TODO: rename this structure to ring buffer footer. It should be common
+// accross logging and event tracing.
 struct log_buffer_metadata {
-	u32	tail_lo;
-	u32	tail_hi;
-	u64	head;
-	u32	reserved[12];
-};
+	u8  ring_version_minor;
+	u8  ring_version_major;
+	u8  ring_purpose;
+	u8  reserved1;
+	u32 payload_version;
+	u8  reserved2[CACHE_LINE_SIZE - 8];
+	u32 write_count;
+	u8  reserved3[RBF_HALF_SIZE - (CACHE_LINE_SIZE + 4)];
+  u32 read_count;
+  u8  reserved4[RBF_HALF_SIZE - 4];
+} __packed;
 
 struct log_msg_header {
+	u64 timestamp;
 	u32 format      : 1;
 	u32 reserved_1  : 7;
 	u32 level       : 3;
@@ -48,7 +60,7 @@ struct log_msg_header {
 	u32 argc        : 8;
 	u32 line        : 16;
 	u32 module      : 16;
-};
+} __packed;
 
 static const char *s_log_level_str[] = {
     "NONE", "ERROR", "WARN", "INFO", "DEBUG",
@@ -99,100 +111,82 @@ static u32 aie2_get_log_content(struct logging_req_buf *req_buf)
 	struct log_buffer_metadata log_metadata;
 	u8 *kern_buf = req_buf->kern_log_buf;
 	u8 *sys_buf = req_buf->buf;
-	u32 head_wrap, tail_wrap;
-	u64 head, tail;
 
-	u32 log_rb_size = 0;
-	u32 log_size = 0;
-
-	log_rb_size = req_buf->dram_buffer_size - sizeof(log_metadata);
+	const u32 log_rb_size = req_buf->dram_buffer_size - sizeof(struct log_buffer_metadata);
 	WARN_ON(log_rb_size <= 0);
 
+	// OPTIMIZE: only need 2nd cache line
 	drm_clflush_virt_range(sys_buf + log_rb_size, sizeof(log_metadata));
 	memcpy(&log_metadata, sys_buf + log_rb_size, sizeof(log_metadata));
 
-	head = req_buf->rb_head;
-	tail = make_64bit(log_metadata.tail_lo, log_metadata.tail_hi);
+	u32 write_count = log_metadata.write_count;
+	XDNA_DBG(ndev->xdna, "Log buffer write count: %u, read count: %u",
+		 write_count, req_buf->read_count);
 
-	head_wrap = head % log_rb_size;
-	tail_wrap = tail % log_rb_size;
-	log_size = tail - head;
+	u32 log_size = 0;
+	if (write_count == req_buf->read_count) {
+		// nothing new to read
+		return 0;
+	} else if (write_count < req_buf->read_count) {  // wrap around case
+		// For the wrap around case, we need to copy the data in two sections:
+		// 1. From read_count to the end of the buffer
+		// 2. From the start of the buffer to write_count
+		u32 log_section_1_size = log_rb_size - req_buf->read_count;
+		u8* src = (u8*)(sys_buf + req_buf->read_count);
+		drm_clflush_virt_range(src, log_section_1_size);
+		memcpy((u8 *)kern_buf, (u8 *)(sys_buf + req_buf->read_count), log_section_1_size);
 
-	if (!log_size)
-		return log_size;
-
-	req_buf->rb_head = tail;
-
-	/* Handle buffer overflow case, dump all log w.r.t timestamp */
-	if (log_size > log_rb_size) {
-		XDNA_DBG(ndev->xdna, "log_size is %u, buffer overflow!", log_size);
-		u32 part_log = log_rb_size - tail_wrap;
-
-		drm_clflush_virt_range((u8 *)sys_buf + tail_wrap, part_log);
-		memcpy((u8 *)kern_buf, (u8 *)sys_buf + tail_wrap, part_log);
-
-		drm_clflush_virt_range(sys_buf, tail_wrap);
-		memcpy((u8 *)(kern_buf + part_log), (u8 *)sys_buf, tail_wrap);
-		return log_rb_size;
+		u32 log_section_2_size = write_count;
+		u8* src2 = (u8*)sys_buf;
+		drm_clflush_virt_range(src2, log_section_2_size);
+		memcpy((u8 *)(kern_buf + log_section_1_size), src2, log_section_2_size);
+		log_size = log_section_1_size + log_section_2_size;
+	} else {
+		log_size = write_count - req_buf->read_count;
+		u8* src = (u8*)(sys_buf + req_buf->read_count);
+		drm_clflush_virt_range(src, log_size);
+		memcpy((u8 *)kern_buf, src, log_size);
 	}
-
-	/*Buffer split into two section when tail is wrapped and copy both */
-	if (tail_wrap < head_wrap) {
-		u32 part_log = log_rb_size - head_wrap;
-
-		drm_clflush_virt_range((u8 *)sys_buf + head_wrap, part_log);
-		memcpy((u8 *)kern_buf, (u8 *)sys_buf + head_wrap, part_log);
-
-		drm_clflush_virt_range(sys_buf, tail_wrap);
-		memcpy((u8 *)(kern_buf + part_log), (u8 *)sys_buf, tail_wrap);
-		return log_size;
-	}
-
-	/* General case when tail > head and with in log buff size */
-	drm_clflush_virt_range((u8 *)sys_buf + head_wrap, log_size);
-	memcpy((u8 *)kern_buf, (u8 *)sys_buf + head_wrap, log_size);
+	req_buf->read_count = write_count;
+	// TODO: write the read_count back to the DRAM log buffer footer so firmware can implement backpressure
 	return log_size;
 }
 
-static char *aie2_get_valid_msg_header(char *start, char *end)
-{
-	while (start && start < end && *start != LOG_FORMAT_FULL)
-		start += sizeof(char) * LOG_MSG_ALIGN;
-	return start;
-}
 
 static void aie2_print_log_buffer_data(struct amdxdna_dev_hdl *ndev)
 {
-	u32 header_size = sizeof(struct log_msg_header);
+	const u32 header_size = sizeof(struct log_msg_header);
 	struct logging_req_buf *req_buf;
 	u32 log_size;
 
 	req_buf = ndev->logging_req;
 	log_size = aie2_get_log_content(req_buf);
-	XDNA_DBG(ndev->xdna, "FW log size in bytes %u", log_size);
 
 	if (!log_size)
 		return;
 
-	char *str = (char *)req_buf->kern_log_buf;
-	char *end = (char *)str + log_size;
+	u8 *log_ptr = req_buf->kern_log_buf;
+	while (log_ptr && log_ptr < (req_buf->kern_log_buf + log_size)) {
+		struct log_msg_header *header = (struct log_msg_header *)log_ptr;
 
-	str = aie2_get_valid_msg_header(str, end);
-	while (str && str < end) {
-		struct log_msg_header *header = (struct log_msg_header *)str;
-		char *msg = (char *)(str + header_size);
-		u32 msg_size;
-
-		msg_size = (header->argc) * sizeof(u32);
-		if (msg_size > 0 && (char *)(msg + msg_size) <= end) {
-			*(char *)((char *)msg + msg_size - 1) = 0;
-			XDNA_INFO(ndev->xdna, "[NPU FW %s]: %s", s_log_level_str[header->level], msg);
+		if (header->format != LOG_FORMAT_FULL) {
+			XDNA_ERR(ndev->xdna, "Invalid log format: %u", header->format);
+			continue;
 		}
 
-		/* move to next msg */
-		msg_size = ((msg_size + LOG_MSG_ALIGN - 1) / LOG_MSG_ALIGN) * LOG_MSG_ALIGN;
-		str += (header_size + msg_size);
-		str = aie2_get_valid_msg_header(str, end);
+		if (!header->argc) {
+			XDNA_ERR(ndev->xdna, "Log entry has no message");
+		}
+
+		u32 msg_size = (header->argc) * sizeof(u32);
+		if (msg_size + header_size > log_size) {
+			XDNA_ERR(ndev->xdna, "Log entry size exceeds available buffer size");
+			return;
+		}
+		log_ptr[header_size + msg_size - 1] = '\0'; // Null-terminate the message
+		XDNA_INFO(ndev->xdna, "[NPU FW %s]: %s", s_log_level_str[header->level],
+			  (char *)(log_ptr + header_size));
+		log_ptr += ALIGN(header_size + msg_size, LOG_MSG_ALIGN);
 	}
 }
 
@@ -234,7 +228,7 @@ static void aie2_free_log_buf(struct amdxdna_dev_hdl *ndev)
 			     req_buf->dram_buffer_address, DMA_FROM_DEVICE);
 
 	req_buf->buf = NULL;
-	req_buf->rb_head = 0;
+	req_buf->read_count = 0;
 	req_buf->dram_buffer_address = 0;
 }
 
@@ -315,7 +309,7 @@ static int aie2_alloc_log_buf(struct amdxdna_dev_hdl *ndev)
 	if (!req_buf->buf)
 		return -ENOMEM;
 
-	req_buf->rb_head = 0;
+	req_buf->read_count = 0;
 	drm_clflush_virt_range(req_buf->buf, req_buf->dram_buffer_size);
 	XDNA_DBG(ndev->xdna, "Dram logging buf addr: 0x%llx",
 		 req_buf->dram_buffer_address);
@@ -604,4 +598,33 @@ void aie2_dram_logging_fini(struct amdxdna_dev_hdl *ndev)
 	aie2_assign_dram_logging_state(ndev, false);
 	kfree(ndev->logging_req);
 	ndev->logging_req = NULL;
+}
+
+bool aie2_check_dram_logging_version(struct amdxdna_dev_hdl *ndev) {
+	struct logging_req_buf *req_buf = ndev->logging_req;
+	struct log_buffer_metadata *rbf_footer;
+	u8 *sys_buf = req_buf->buf;
+	const u32 log_rb_size = req_buf->dram_buffer_size - sizeof(struct log_buffer_metadata);
+	bool check_passed = true;
+
+	rbf_footer = kzalloc(sizeof(*rbf_footer), GFP_KERNEL);
+	if (!rbf_footer)
+		return false;
+
+	// Note: we only need to read the first cache line
+	drm_clflush_virt_range(sys_buf + log_rb_size, CACHE_LINE_SIZE);
+	memcpy(rbf_footer, sys_buf + log_rb_size, CACHE_LINE_SIZE);
+
+	if (rbf_footer->ring_version_major != LOGGING_FOOTER_VERSION_MAJOR ||
+		rbf_footer->ring_version_minor != LOGGING_FOOTER_VERSION_MINOR ||
+		rbf_footer->ring_purpose != RBF_FOOTER_PURPOSE_LOGGING) {
+		XDNA_ERR(ndev->xdna, "Event trace version mismatch: "
+			 "expected %d.%d.%d != actual %d.%d.%d",
+			 LOGGING_FOOTER_VERSION_MAJOR, LOGGING_FOOTER_VERSION_MINOR, RBF_FOOTER_PURPOSE_LOGGING,
+			 rbf_footer->ring_version_major, rbf_footer->ring_version_minor, rbf_footer->ring_purpose);
+		check_passed = false;
+	}
+
+	kfree(rbf_footer);
+	return check_passed;
 }

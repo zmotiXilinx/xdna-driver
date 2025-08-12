@@ -489,8 +489,8 @@ static int aie2_hw_resume(struct amdxdna_dev *xdna)
 
 	XDNA_DBG(xdna, "context resuming...");
 	aie2_rq_restart_all(&xdna->dev_handle->ctx_rq);
-	aie2_event_trace_resume(xdna->dev_handle);
 	aie2_dram_logging_resume(xdna->dev_handle);
+	aie2_event_trace_resume(xdna->dev_handle);
 	return 0;
 }
 

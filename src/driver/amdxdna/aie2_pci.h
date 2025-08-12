@@ -478,9 +478,9 @@ int aie2_error_async_msg_thread(void *data);
 bool aie2_is_event_trace_enable(struct amdxdna_dev_hdl *ndev);
 int  aie2_event_trace_init(struct amdxdna_dev_hdl *ndev);
 void aie2_event_trace_fini(struct amdxdna_dev_hdl *ndev);
-void aie2_set_trace_timestamp(struct amdxdna_dev_hdl *ndev,
+void aie2_set_trace_interrupt(struct amdxdna_dev_hdl *ndev,
 			      struct start_event_trace_resp *resp);
-void aie2_unset_trace_timestamp(struct amdxdna_dev_hdl *ndev);
+void aie2_unset_trace_interrupt(struct amdxdna_dev_hdl *ndev);
 void aie2_config_event_trace(struct amdxdna_dev_hdl *ndev, u32 enable,
 			     u32 size, u32 category);
 void aie2_event_trace_suspend(struct amdxdna_dev_hdl *ndev);
@@ -488,6 +488,7 @@ void aie2_event_trace_resume(struct amdxdna_dev_hdl *ndev);
 int  aie2_set_event_trace_cfg(struct amdxdna_dev_hdl *ndev, u32 category);
 int  aie2_set_event_trace_categories(struct amdxdna_dev_hdl *ndev, u32 category);
 u32  aie2_get_event_trace_categories(struct amdxdna_dev_hdl *ndev);
+bool aie2_check_event_trace_version(struct amdxdna_dev_hdl *ndev);
 
 /* aie2_message.c */
 bool aie2_is_supported_msg(struct amdxdna_dev_hdl *ndev, enum aie2_msg_opcode opcode);
@@ -592,5 +593,6 @@ void aie2_set_dram_log_runtime_cfg(struct amdxdna_dev_hdl *ndev,
 				   u32 loglevel, u32 format, int dest);
 u32 aie2_get_log_level(struct amdxdna_dev_hdl *ndev);
 int aie2_set_log_level(struct amdxdna_dev_hdl *ndev, u32 level);
+bool aie2_check_dram_logging_version(struct amdxdna_dev_hdl *ndev);
 
 #endif /* _AIE2_PCI_H_ */

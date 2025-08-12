@@ -405,12 +405,17 @@ int aie2_start_event_trace(struct amdxdna_dev_hdl *ndev, dma_addr_t addr,
 	req.event_trace_categories = event_category;
 	req.event_trace_timestamp = EVENT_TRACE_TIMESTAMP_FW_CHRONO;
 
-	XDNA_DBG(ndev->xdna, "send start event trace msg");
+	XDNA_INFO(ndev->xdna, "send start event trace msg addr: 0x%llx size=%u", addr, size);
 	ret = aie2_send_mgmt_msg_wait(ndev, &msg);
 	if (ret)
 		return ret;
 
-	aie2_set_trace_timestamp(ndev, &resp);
+	if (!aie2_check_event_trace_version(ndev)) {
+		XDNA_ERR(ndev->xdna, "Event trace version mismatch");
+		return -EINVAL;
+	}
+
+	aie2_set_trace_interrupt(ndev, &resp);
 	return 0;
 }
 
@@ -419,12 +424,13 @@ int aie2_stop_event_trace(struct amdxdna_dev_hdl *ndev)
 	DECLARE_AIE2_MSG(stop_event_trace, MSG_OP_STOP_EVENT_TRACE);
 	int ret;
 
-	XDNA_DBG(ndev->xdna, "send stop event trace msg");
+	XDNA_INFO(ndev->xdna, "send stop event trace msg");
 	ret = aie2_send_mgmt_msg_wait(ndev, &msg);
 	if (ret)
 		return ret;
 
-	aie2_unset_trace_timestamp(ndev);
+	XDNA_INFO(ndev->xdna, "stop message sent, now unregistering interrupt");
+	aie2_unset_trace_interrupt(ndev);
 	return 0;
 }
 
@@ -457,6 +463,11 @@ int aie2_configure_dram_logging(struct amdxdna_dev_hdl *ndev, dma_addr_t addr, u
 	/* Send same cmd with size 0, to detach logger from FW */
 	if (!size)
 		return 0;
+
+	if (!aie2_check_dram_logging_version(ndev)) {
+		XDNA_ERR(ndev->xdna, "Dram logging version mismatch");
+		return -EINVAL;
+	}
 
 	aie2_configure_log_buf_irq(ndev, &resp);
 	return 0;

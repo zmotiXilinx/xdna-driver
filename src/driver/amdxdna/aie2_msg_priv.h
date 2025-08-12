@@ -409,8 +409,23 @@ struct async_event_msg_resp {
 
 /* Start of event tracing data struct */
 #define MAX_ONE_TIME_LOG_INFO_LEN			16
-#define DEFAULT_EVENT_BUF_SIZE				0x2000
+#define DEFAULT_EVENT_BUF_SIZE				0x4000 // 16 KB
 #define DEFAULT_EVENT_CATEGORY				0xFFFFFFFF
+
+#define CACHE_LINE_SIZE      (64)
+#define RBF_TOTAL_SIZE (4096)
+#define RBF_HALF_SIZE (RBF_TOTAL_SIZE / 2)
+
+#define TRACE_FOOTER_VERSION_MINOR       (0)
+#define TRACE_FOOTER_VERSION_MAJOR       (1)
+
+#define LOGGING_FOOTER_VERSION_MINOR     (0)
+#define LOGGING_FOOTER_VERSION_MAJOR     (1)
+
+#define RBF_FOOTER_PURPOSE_EVENT_TRACE   (1)
+#define RBF_FOOTER_PURPOSE_LOGGING       (2)
+
+
 
 enum event_trace_destination {
 	EVENT_TRACE_DEST_DEBUG_BUS,
@@ -468,13 +483,9 @@ enum cmd_chain_class {
 	CMD_CHAIN_CLASS_MAX,
 };
 
-#define DRAM_LOG_BUF_METADATA_SIZE			0x40
-#define DEFAULT_DRAM_LOG_BUF_SIZE			0x2000
+#define DEFAULT_DRAM_LOG_BUF_SIZE			0x4000
 #define POLL_INTERVAL_MS				200
-#define LOG_FORMAT_FULL					0xc0
-#define LOG_MSG_ALIGN					8
 #define MSI_ADDR_MASK					0x00FFFFFF
-#define make_64bit(lo, hi)	((u64)(lo) | ((u64)(hi) << 32))
 
 enum runtime_configuration_type_ {
 	RUNTIME_CONFIGURATION_CLOCK_GATING = 1,
