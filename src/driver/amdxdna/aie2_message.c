@@ -718,6 +718,11 @@ int aie2_get_app_health(struct amdxdna_dev_hdl *ndev, struct aie2_mgmt_dma_hdl *
 	}
 
 	if (resp.status != AIE2_STATUS_SUCCESS) {
+		if (resp.status == AIE2_STATUS_MGMT_ERT_DRAM_BUFFER_SIZE_INVALID) {
+			XDNA_ERR(xdna, "Get app health failed, provided buffer size %u != expected buffer size %u",
+				 size, resp.error_details[0]);
+			return -EINVAL;
+		}
 		XDNA_DBG(xdna, "Get app health got status 0x%x", resp.status);
 		ret = -EINVAL;
 	}
