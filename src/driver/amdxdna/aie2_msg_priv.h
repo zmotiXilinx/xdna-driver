@@ -750,8 +750,6 @@ struct app_health_report {
 	u32				ctx_pc;
 #define AIE2_APP_HEALTH_RESET_FATAL_INFO	0
 	struct fatal_error_info		fatal_info;
-	/* Below captures complex platform dependent data parsed by userspace */
-	u32				resv[1528];
 };
 
 struct get_app_health_req {
