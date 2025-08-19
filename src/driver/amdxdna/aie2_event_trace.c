@@ -107,34 +107,35 @@ static u32 aie2_get_event_trace_content(struct event_trace_req_buf *req_buf)
 	memcpy(&trace_metadata, sys_buf + log_rb_size, sizeof(trace_metadata));
 
 	u32 write_count = trace_metadata.write_count;
+	u32 write_ptr = write_count % log_rb_size;
 
 	u32 log_size = 0;
-	if (write_count == req_buf->read_count) {
+	if (write_ptr == req_buf->read_count) {
 		return 0;
-	} else if (write_count < req_buf->read_count) {  // wrap around case
+	} else if (write_ptr < req_buf->read_count) {  // wrap around case
 		// For the wrap around case, we need to copy the data in two sections:
 		// 1. From read_count to the end of the buffer
-		// 2. From the start of the buffer to write_count
+		// 2. From the start of the buffer to write_ptr
 		XDNA_INFO(ndev->xdna, "[EVT] wrapped around");
 		u32 log_section_1_size = log_rb_size - req_buf->read_count;
 		u8* src = (u8*)(sys_buf + req_buf->read_count);
 		drm_clflush_virt_range(src, log_section_1_size);
 		memcpy((u8 *)kern_buf, (u8 *)(sys_buf + req_buf->read_count), log_section_1_size);
 
-		u32 log_section_2_size = write_count;
+		u32 log_section_2_size = write_ptr;
 		u8* src2 = (u8*)sys_buf;
 		drm_clflush_virt_range(src2, log_section_2_size);
 		memcpy((u8 *)(kern_buf + log_section_1_size), src2, log_section_2_size);
 		log_size = log_section_1_size + log_section_2_size;
 	} else {
-		XDNA_INFO(ndev->xdna, "[EVT] normal case, write_count: %u, read_count: %u",
-			 write_count, req_buf->read_count);
-		log_size = write_count - req_buf->read_count;
+		XDNA_INFO(ndev->xdna, "[EVT] normal case, write_ptr: %u, read_count: %u",
+			 write_ptr, req_buf->read_count);
+		log_size = write_ptr - req_buf->read_count;
 		u8* src = (u8*)(sys_buf + req_buf->read_count);
 		drm_clflush_virt_range(src, log_size);
 		memcpy((u8 *)kern_buf, src, log_size);
 	}
-	req_buf->read_count = write_count;
+	req_buf->read_count = write_ptr;
 	// TODO: write the read_count back to the DRAM event trace buffer footer so firmware can implement backpressure
 	return log_size;
 }
