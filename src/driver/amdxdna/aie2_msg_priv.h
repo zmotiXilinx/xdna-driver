@@ -49,6 +49,7 @@ enum aie2_msg_opcode {
 	MSG_OP_GET_APP_HEALTH              = 0x114,
 	MSG_OP_ADD_HOST_BUFFER             = 0x115,
 	MSG_OP_CONFIG_FW_LOG		   = 0x116,
+	MSG_OP_CALIBRATE_TIME              = 0x11C,
 	MSG_OP_MAX_DRV_OPCODE,
 	MSG_OP_GET_PROTOCOL_VERSION        = 0x301,
 	MSG_OP_MAX_OPCODE
@@ -723,6 +724,14 @@ struct get_app_health_resp {
 	enum aie2_msg_status status;
 	u32 required_buffer_size;
 	u32 reserved[7];
+} __packed;
+
+struct calibrate_time_req {
+	u64 kmd_timestamp_ns;
+} __packed;
+
+struct calibrate_time_resp {
+	enum aie2_msg_status status;
 } __packed;
 
 /* Do NOT put any firmware defined struct, enum etc. start from here */

@@ -5,6 +5,7 @@
 
 #include <linux/kthread.h>
 #include <drm/drm_cache.h>
+#include <linux/ktime.h>
 
 #include "drm_local/amdxdna_accel.h"
 #include "amdxdna_mailbox_helper.h"
@@ -1510,6 +1511,25 @@ int aie2_config_debug_bo(struct amdxdna_ctx *ctx, struct amdxdna_sched_job *job,
 		return ret;
 	}
 	job->msg_id = msg.id;
+
+	return 0;
+}
+
+int aie2_calibrate_time(struct amdxdna_dev_hdl *ndev) {
+	DECLARE_AIE2_MSG(calibrate_time, MSG_OP_CALIBRATE_TIME);
+	struct amdxdna_dev *xdna = ndev->xdna;
+	int ret;
+
+	XDNA_INFO(xdna, "attempting to calibrate time");
+
+	req.kmd_timestamp_ns = ktime_get_real_ns();
+	XDNA_INFO(xdna, "kmd_timestamp_ns: %llu", req.kmd_timestamp_ns);
+
+	ret = aie2_send_mgmt_msg_wait(ndev, &msg);
+	if (ret) {
+		XDNA_ERR(xdna, "Failed to calibrate time, ret 0x%x", resp.status);
+		return -EINVAL;
+	}
 
 	return 0;
 }

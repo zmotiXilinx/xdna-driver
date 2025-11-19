@@ -18,6 +18,20 @@ static const char * const fw_log_level_str[] = {
 	"MAX"
 };
 
+struct fw_rbf_entry_header {
+  u8  magic;           // 0xCA
+  u8  payload_words;   // size in multiple of sizeof(ipu_log_ring_entry_payload_word_t) of payload (excluding this header and corresponding footer)
+  u16 sequence_number; // 1 - 2^16-1: valid entries
+  u32 rsvd;            // reserved: set to zero
+} __packed;
+
+struct fw_rbf_entry_footer {
+  u32 rsvd;            // reserved: set to zero
+  u16 sequence_number; // 1 - 2^16-1: valid entries
+  u8  payload_words;   // size in multiple of sizeof(ipu_log_ring_entry_payload_word_t) of payload (excluding this header and corresponding footer)
+  u8  magic;           // 0xBA
+} __packed;
+
 void aie2_fw_log_parse(struct amdxdna_dev *xdna, char *buffer, size_t size)
 {
 	char *end = buffer + size;
@@ -26,6 +40,7 @@ void aie2_fw_log_parse(struct amdxdna_dev *xdna, char *buffer, size_t size)
 		return;
 
 	while (buffer < end) {
+		struct fw_rbf_entry_header *entry_header = (struct fw_rbf_entry_header *)buffer;
 		struct fw_log_header {
 			u64 timestamp;
 			u32 format      : 1;
@@ -41,7 +56,7 @@ void aie2_fw_log_parse(struct amdxdna_dev *xdna, char *buffer, size_t size)
 		char appid[20];
 		u32 msg_size;
 
-		header = (struct fw_log_header *)buffer;
+		header = (struct fw_log_header *) (buffer + sizeof(struct fw_rbf_entry_header));
 
 		if (header->format != FW_LOG_FORMAT_FULL || !header->argc || header->level > 4) {
 			XDNA_ERR(xdna, "Potential buffer overflow or corruption!\n");
@@ -50,20 +65,33 @@ void aie2_fw_log_parse(struct amdxdna_dev *xdna, char *buffer, size_t size)
 		}
 
 		msg_size = (header->argc) * sizeof(u32);
-		if (msg_size + header_size > size) {
+		struct fw_rbf_entry_footer *entry_footer = (struct fw_rbf_entry_footer *)(buffer + sizeof(struct fw_rbf_entry_header) + entry_header->payload_words * sizeof(u64));
+		const u32 entry_size = sizeof(struct fw_rbf_entry_header) + sizeof(struct fw_rbf_entry_footer) + entry_header->payload_words * sizeof(u64);
+		if (entry_size > size) {
 			XDNA_ERR(xdna, "Log entry size exceeds available buffer size");
 			return;
 		}
+
+		msleep(1);
+
+		if (entry_footer->magic != 0xBA)
+			XDNA_ERR(xdna, "Log entry footer magic is corrupted: 0x%x", entry_footer->magic);
+		if (entry_footer->sequence_number != entry_header->sequence_number)
+			XDNA_ERR(xdna, "Log entry footer sequence number is corrupted: %d != %d", entry_footer->sequence_number, entry_header->sequence_number);
+		if (entry_footer->payload_words != entry_header->payload_words)
+			XDNA_ERR(xdna, "Log entry footer payload words is corrupted: %d != %d", entry_footer->payload_words, entry_header->payload_words);
+		if (entry_header->magic != 0xCA)
+			XDNA_ERR(xdna, "Log entry header magic is corrupted: 0x%x", entry_header->magic);
 
 		if (header->appn == AIE2_MGMT_APP_ID)
 			scnprintf(appid, sizeof(appid), "MGMNT");
 		else
 			scnprintf(appid, sizeof(appid), "APP%2d", header->appn);
 
-		XDNA_INFO(xdna, "[%lld] [%s] [%s]: %s", header->timestamp,
-			  fw_log_level_str[header->level], appid, (char *)(buffer + header_size));
+		XDNA_INFO(xdna, "[%lld] [%d] [%s] [%s]: %s", header->timestamp, entry_header->sequence_number,
+			  fw_log_level_str[header->level], appid, (char *)(buffer + header_size + sizeof(struct fw_rbf_entry_header)));
 
-		buffer += ALIGN(header_size + msg_size, AMDXDNA_DPT_FW_LOG_MSG_ALIGN);
+		buffer += ALIGN(header_size + msg_size + sizeof(struct fw_rbf_entry_footer) + sizeof(struct fw_rbf_entry_header), AMDXDNA_DPT_FW_LOG_MSG_ALIGN);
 	}
 }
 
@@ -79,6 +107,12 @@ int aie2_fw_log_init(struct amdxdna_dev *xdna, size_t size, u8 level)
 	}
 
 	mutex_lock(&xdna->dev_handle->aie2_lock);
+	ret = aie2_calibrate_time(xdna->dev_handle);
+	if (ret) {
+		XDNA_ERR(xdna, "Failed to calibrate time: %d", ret);
+		mutex_unlock(&xdna->dev_handle->aie2_lock);
+		return ret;
+	}
 	ret = aie2_config_fw_log(xdna->dev_handle, dma_hdl, size, &msi_idx, &msi_address);
 	if (ret) {
 		/* Sliently fail for device generation that don't support FW logging */
@@ -165,7 +199,29 @@ void aie2_fw_trace_parse(struct amdxdna_dev *xdna, char *buffer, size_t size)
 	if (!size)
 		return;
 
-	print_hex_dump(KERN_INFO, "[FW TRACE]: ", DUMP_PREFIX_OFFSET, 16, 4, buffer, size, false);
+
+	u32 num_entries = size / 32;
+
+	for (size_t i = 0; i < num_entries; ++i) {
+		struct fw_rbf_entry_header *entry_header = (struct fw_rbf_entry_header *) buffer;
+		struct fw_rbf_entry_footer *entry_footer = (struct fw_rbf_entry_footer *) (buffer + sizeof(struct fw_rbf_entry_header) + entry_header->payload_words * sizeof(u64));
+		struct trace_payload {
+			u64 timestamp;
+			u64 payload;
+		} *payload;
+		payload = (struct trace_payload *) (buffer + sizeof(struct fw_rbf_entry_header));
+		if (entry_footer->magic != 0xBA)
+			XDNA_ERR(xdna, "Log entry footer magic is corrupted: 0x%x", entry_footer->magic);
+		if (entry_footer->sequence_number != entry_header->sequence_number)
+			XDNA_ERR(xdna, "Log entry footer sequence number is corrupted: %d != %d", entry_footer->sequence_number, entry_header->sequence_number);
+		if (entry_footer->payload_words != entry_header->payload_words)
+			XDNA_ERR(xdna, "Log entry footer payload words is corrupted: %d != %d", entry_footer->payload_words, entry_header->payload_words);
+		if (entry_header->magic != 0xCA)
+			XDNA_ERR(xdna, "Log entry header magic is corrupted: 0x%x", entry_header->magic);
+
+		XDNA_INFO(xdna, "[%lld] [%05d] payload: 0x%016llx", payload->timestamp, entry_header->sequence_number, payload->payload);
+		buffer += 32;
+	}
 }
 
 int aie2_fw_trace_init(struct amdxdna_dev *xdna, size_t size, u32 categories)
@@ -175,6 +231,12 @@ int aie2_fw_trace_init(struct amdxdna_dev *xdna, size_t size, u32 categories)
 	int ret;
 
 	mutex_lock(&xdna->dev_handle->aie2_lock);
+	ret = aie2_calibrate_time(xdna->dev_handle);
+	if (ret) {
+		XDNA_ERR(xdna, "Failed to calibrate time: %d", ret);
+		mutex_unlock(&xdna->dev_handle->aie2_lock);
+		return ret;
+	}
 	ret = aie2_start_fw_trace(xdna->dev_handle, dma_hdl, size, categories, &msi_idx,
 				  &msi_address);
 	if (ret) {
