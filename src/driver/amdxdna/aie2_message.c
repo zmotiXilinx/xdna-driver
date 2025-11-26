@@ -887,6 +887,8 @@ static int aie2_init_exec_cu_req(struct amdxdna_gem_obj *cmd_bo, void *req,
 	void *cmd;
 
 	cmd = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!cmd)
+		return -EINVAL;
 	if (cmd_len > sizeof(cu_req->payload))
 		return -EINVAL;
 
@@ -909,6 +911,8 @@ static int aie2_init_exec_dpu_req(struct amdxdna_gem_obj *cmd_bo, void *req,
 	u32 cmd_len;
 
 	sn = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!sn)
+		return -EINVAL;
 	if (cmd_len - sizeof(*sn) > sizeof(dpu_req->payload))
 		return -EINVAL;
 
@@ -954,6 +958,8 @@ aie2_cmdlist_fill_cf(struct amdxdna_gem_obj *cmd_bo, void *slot, size_t *size)
 	void *cmd;
 
 	cmd = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!cmd)
+		return -EINVAL;
 	if (*size < sizeof(*cf_slot) + cmd_len)
 		return -EINVAL;
 
@@ -977,6 +983,8 @@ aie2_cmdlist_fill_dpu(struct amdxdna_gem_obj *cmd_bo, void *slot, size_t *size)
 	u32 arg_sz;
 
 	sn = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!sn)
+		return -EINVAL;
 	arg_sz = cmd_len - sizeof(*sn);
 	if (cmd_len < sizeof(*sn) || arg_sz > MAX_DPU_ARGS_SIZE)
 		return -EINVAL;
@@ -1037,6 +1045,8 @@ aie2_cmdlist_fill_npu_cf(struct amdxdna_gem_obj *cmd_bo, void *slot, size_t *siz
 	void *cmd;
 
 	cmd = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!cmd)
+		return -EINVAL;
 	if (*size < sizeof(*npu_slot) + cmd_len)
 		return -EINVAL;
 
@@ -1062,6 +1072,9 @@ aie2_cmdlist_fill_npu_dpu(struct amdxdna_gem_obj *cmd_bo, void *slot, size_t *si
 	u32 arg_sz;
 
 	sn = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!sn)
+		return -EINVAL;
+
 	arg_sz = cmd_len - sizeof(*sn);
 	if (cmd_len < sizeof(*sn) || arg_sz > MAX_NPU_ARGS_SIZE)
 		return -EINVAL;
@@ -1094,6 +1107,9 @@ aie2_cmdlist_fill_npu_preempt(struct amdxdna_gem_obj *cmd_bo, void *slot, size_t
 	u32 arg_sz;
 
 	pd = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!pd)
+		return -EINVAL;
+
 	arg_sz = cmd_len - sizeof(*pd);
 	if (cmd_len < sizeof(*pd) || arg_sz > MAX_NPU_ARGS_SIZE)
 		return -EINVAL;
@@ -1130,6 +1146,9 @@ aie2_cmdlist_fill_npu_elf(struct amdxdna_gem_obj *cmd_bo, void *slot, size_t *si
 	u32 arg_sz;
 
 	pd = amdxdna_cmd_get_payload(cmd_bo, &cmd_len);
+	if (!pd)
+		return -EINVAL;
+
 	arg_sz = cmd_len - sizeof(*pd);
 	if (cmd_len < sizeof(*pd) || arg_sz > MAX_NPU_ARGS_SIZE)
 		return -EINVAL;
@@ -1317,7 +1336,10 @@ int aie2_cmdlist_multi_execbuf(struct amdxdna_ctx *ctx,
 
 	op = amdxdna_cmd_get_op(cmd_abo);
 	payload = amdxdna_cmd_get_payload(cmd_abo, &payload_len);
-	if (op != ERT_CMD_CHAIN || !payload || !payload->command_count ||
+	if (!payload)
+		return -EINVAL;
+
+	if (op != ERT_CMD_CHAIN || !payload->command_count ||
 	    payload_len < struct_size(payload, data, payload->command_count))
 		return -EINVAL;
 
